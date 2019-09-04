@@ -1,0 +1,108 @@
+# Copyright (c) 2017-present, Facebook, Inc.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+#
+
+'''
+Binary classifier and corresponding datasets : MR, CR, SUBJ, MPQA
+'''
+from __future__ import absolute_import, division, unicode_literals
+
+import io
+import os
+import numpy as np
+import logging
+import tqdm
+import time
+
+from senteval.tools.validation import InnerKFoldClassifier, HyperSplitClassifier
+
+
+class BinaryClassifierEval(object):
+    def __init__(self, pos, neg, seed=1111):
+        self.seed = seed
+        self.samples, self.labels = pos + neg, [1] * len(pos) + [0] * len(neg)
+        self.n_samples = len(self.samples)
+
+    def do_prepare(self, params, prepare):
+        # prepare is given the whole text
+        return prepare(params, self.samples)
+        # prepare puts everything it outputs in "params" : params.word2id etc
+        # Those output will be further used by "batcher".
+
+    def loadFile(self, fpath):
+        with io.open(fpath, 'r', encoding='latin-1') as f:
+            return [line.split() for line in f.read().splitlines()]
+
+    def run(self, params, batcher, space_search):
+        enc_input = []
+        # Sort to reduce padding
+        sorted_corpus = sorted(zip(self.samples, self.labels),
+                               key=lambda z: (len(z[0]), z[1]))
+        sorted_samples = [x for (x, y) in sorted_corpus]
+        sorted_labels = [y for (x, y) in sorted_corpus]
+        print('Generating sentence embeddings')
+        start = time.time()
+        for ii in tqdm.tqdm(np.arange(0, self.n_samples, params.batch_size)):
+            batch = sorted_samples[ii:ii + params.batch_size]
+            embeddings = batcher(params, batch)
+            enc_input.append(embeddings)
+        enc_input = np.vstack(enc_input)
+        print('Generated sentence embeddings')
+        
+        time_preprocess = time.time()-start
+        config_classifier = {
+            'config': {
+                'outputdim': 2,
+                'seed': self.seed,
+                      },
+            'split': [0.15, 0.15],
+            'space_search': space_search,
+            'iter_bayes':   params.iter_bayes,
+            'cudaEfficient': params.cudaEfficient
+            }
+        
+        start = time.time()
+        clf = HyperSplitClassifier(enc_input, np.array(sorted_labels), config_classifier)
+
+        devacc, testacc, best_params = clf.run()
+        time_train = time.time()-start
+        
+        print('Dev acc : {0} Test acc : {1}\n'.format(devacc, testacc))
+        return {'devacc': devacc, 'acc': testacc, 'ndev': int(self.n_samples*config_classifier['split'][0]),
+                'ntest': int(self.n_samples*config_classifier['split'][1]), 'best_params': best_params, 
+                'time_preprocess': time_preprocess, 'time_train': time_train}
+
+
+class CREval(BinaryClassifierEval):
+    def __init__(self, task_path, seed=1111):
+        print('***** Transfer task : CR *****\n\n')
+        pos = self.loadFile(os.path.join(task_path, 'custrev.pos'))
+        neg = self.loadFile(os.path.join(task_path, 'custrev.neg'))
+        super(self.__class__, self).__init__(pos, neg, seed)
+
+
+class MREval(BinaryClassifierEval):
+    def __init__(self, task_path, seed=1111):
+        print('***** Transfer task : MR *****\n\n')
+        pos = self.loadFile(os.path.join(task_path, 'rt-polarity.pos'))
+        neg = self.loadFile(os.path.join(task_path, 'rt-polarity.neg'))
+        super(self.__class__, self).__init__(pos, neg, seed)
+
+
+class SUBJEval(BinaryClassifierEval):
+    def __init__(self, task_path, seed=1111):
+        print('***** Transfer task : SUBJ *****\n\n')
+        obj = self.loadFile(os.path.join(task_path, 'subj.objective'))
+        subj = self.loadFile(os.path.join(task_path, 'subj.subjective'))
+        super(self.__class__, self).__init__(obj, subj, seed)
+
+
+class MPQAEval(BinaryClassifierEval):
+    def __init__(self, task_path, seed=1111):
+        print('***** Transfer task : MPQA *****\n\n')
+        pos = self.loadFile(os.path.join(task_path, 'mpqa.pos'))
+        neg = self.loadFile(os.path.join(task_path, 'mpqa.neg'))
+        super(self.__class__, self).__init__(pos, neg, seed)
